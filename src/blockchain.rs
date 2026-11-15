@@ -13,11 +13,11 @@ use crate::storage::{Account, StateDB};
 use crate::transaction::Transaction;
 use crate::validation;
 
-pub const LEGACY_PREFIX_MAIN: u8 = 0x30;
+pub const LEGACY_PREFIX_MAIN: u8 = 0x4b; // HARD FORK: "X" prefix
 pub const LEGACY_PREFIX_TEST: u8 = 0x6f;
 pub const LEGACY_PREFIX_REGTEST: u8 = 0x6f;
 
-pub const BECH32_HRP_MAIN: &str = "xepc";
+pub const BECH32_HRP_MAIN: &str = "xepay";
 pub const BECH32_HRP_TEST: &str = "xtes";
 pub const BECH32_HRP_REGTEST: &str = "xreg";
 
@@ -181,8 +181,8 @@ pub mod checkpoint {
     }
 
     pub const CHECKPOINTS: &[Checkpoint] = &[Checkpoint {
-        height: 0,
-        hash: "0000000000000000000000000000000000000000000000000000000000000000",
+        height: 1000,
+        hash: "000000033be44b327cd3ec8b1184de56df9fce9c00e72eba28d58e5f567ba5dc",
     }];
 
     pub fn find(height: u64) -> Option<&'static str> {
@@ -255,13 +255,15 @@ pub use spec::difficulty_adjust_interval;
 pub use spec::hash_algo;
 pub use spec::initial_reward;
 pub use spec::initial_reward_xepc;
-pub use spec::max_halvings;
+pub use spec::max_eras;
 pub use spec::max_supply;
 pub use spec::max_supply_xepc;
 pub use spec::miner_confirmation_window;
 pub use spec::pow_target_spacing_secs;
 pub use spec::pow_target_timespan_secs;
 pub use spec::protocol_version;
+pub use spec::reward_reduction_denominator;
+pub use spec::reward_reduction_numerator;
 pub use spec::signature_algo;
 pub use spec::subsidy_halving_interval;
 pub use spec::symbol;
@@ -298,7 +300,7 @@ pub struct Blockchain {
 
 impl Blockchain {
     pub fn new() -> Self {
-        let mut genesis = Block::genesis();
+        let genesis = Block::genesis();
 
         let db_path = crate::datadir::state_db_path();
         let mut state = StateDB::open(&db_path).expect("failed to open state db");
@@ -319,9 +321,10 @@ impl Blockchain {
                 .expect("failed to init genesis account");
         }
 
-        if let Ok(root) = state.root_hash() {
-            genesis.state_root = hex::encode(root);
-        }
+        // FIX: Do NOT overwrite genesis.state_root. The genesis block's
+        // state_root must remain empty so that its hash matches
+        // EXPECTED_GENESIS_HASH. The state trie is initialized separately,
+        // and the genesis block does not commit to any state root.
 
         Blockchain {
             chain: vec![genesis],
@@ -350,16 +353,37 @@ impl Blockchain {
         self.chain.iter().fold(0u64, |acc, b| acc.saturating_add(b.reward))
     }
 
-    // FIX: Prevent overflow by capping halvings_u64 before casting to u32
+    /// Calculate the block reward at the given height.
+    ///
+    /// The reward starts at `INITIAL_REWARD` and is reduced by 10% per era
+    /// (every `SUBSIDY_HALVING_INTERVAL` blocks). After `MAX_ERAS`, the
+    /// reward becomes zero.
+    ///
+    /// Formula: `reward = INITIAL_REWARD × (9/10)^era`
+    /// In integer math: `reward = INITIAL_REWARD × 9^era / 10^era`
     pub fn calculate_reward(height: u64) -> u64 {
-        let halvings_u64 = height / spec::SUBSIDY_HALVING_INTERVAL;
-        
-        if halvings_u64 >= spec::MAX_HALVINGS as u64 {
+        let era = (height / spec::SUBSIDY_HALVING_INTERVAL) as u32;
+
+        // If we've passed MAX_ERAS, reward is zero.
+        if era >= spec::MAX_ERAS {
             return 0;
         }
-        
-        let halvings = halvings_u64 as u32;
-        spec::INITIAL_REWARD >> halvings
+
+        // reward = INITIAL_REWARD × (9/10)^era
+        // To avoid floating point, use integer math:
+        // reward = INITIAL_REWARD × 9^era / 10^era
+        let mut reward = spec::INITIAL_REWARD;
+
+        for _ in 0..era {
+            reward = reward
+                .saturating_mul(spec::REWARD_REDUCTION_NUMERATOR)
+                / spec::REWARD_REDUCTION_DENOMINATOR;
+            if reward == 0 {
+                return 0;
+            }
+        }
+
+        reward
     }
 
     pub fn current_era(&self) -> u64 {
@@ -386,11 +410,11 @@ impl Blockchain {
     }
 
     pub fn mature_balance_of(&self, addr: &str) -> u64 {
-        self.state.mature_balance_of(addr)
+        self.state.mature_balance_of(addr, self.height())
     }
 
     pub fn immature_balance_of(&self, addr: &str) -> u64 {
-        self.state.immature_balance_of(addr)
+        self.state.immature_balance_of(addr, self.height())
     }
 
     pub fn nonce_of(&self, addr: &str) -> u64 {

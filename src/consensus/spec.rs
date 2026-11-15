@@ -141,22 +141,39 @@ pub const DECIMALS: u32 = 8;
 pub const ALD_PER_XEPC: u64 = 100_000_000;
 
 // === ECONOMIC PARAMETERS ===
-// Total supply: 485,000,000 XEPC
+// Total supply: 780,000,000 XEPC
 // Initial reward: 15 XEPC
-// Halving interval: 16,166,666 blocks
-pub const MAX_SUPPLY_XEPC: u64 = 485_000_000;
+// Reward reduction: 10% per era (not 50% halving)
+// Era interval: 5,200,000 block (~2.47 years)
+// Supply exhaustion: ~108 years for 99%, ~200+ years for 99.99%
+
+pub const MAX_SUPPLY_XEPC: u64 = 780_000_000;
 pub const MAX_SUPPLY: u64 = MAX_SUPPLY_XEPC * ALD_PER_XEPC;
 
 pub const INITIAL_REWARD_XEPC: u64 = 15;
 pub const INITIAL_REWARD: u64 = INITIAL_REWARD_XEPC * ALD_PER_XEPC;
 
-pub const SUBSIDY_HALVING_INTERVAL: u64 = 16_166_666;
-pub const MAX_HALVINGS: u32 = 64;
+// Era interval (5,200,000 block ≈ 2.47 years).
+pub const SUBSIDY_HALVING_INTERVAL: u64 = 5_200_000;
 
-pub const POW_TARGET_SPACING_SECS: u64 = 15;
-pub const POW_TARGET_TIMESPAN_SECS: u64 = DIFFICULTY_ADJUST_INTERVAL * POW_TARGET_SPACING_SECS;
-pub const MINER_CONFIRMATION_WINDOW: u64 = 69_120;
+// Reward reduction per era: 10% (0.9x).
+// reward(era) = INITIAL_REWARD × 0.9^era
+// In integer math: reward = INITIAL_REWARD × 9^era / 10^era
+pub const REWARD_REDUCTION_NUMERATOR: u64 = 9;
+pub const REWARD_REDUCTION_DENOMINATOR: u64 = 10;
+
+// Maximum number of eras before reward becomes zero.
+// With 10% reduction, reward becomes < 1 ALD after ~185 eras.
+// We cap at 200 eras for safety.
+pub const MAX_ERAS: u32 = 200;
+
+// NOTE: DIFFICULTY_ADJUST_INTERVAL must be declared before
+// POW_TARGET_TIMESPAN_SECS because the latter depends on the former.
 pub const DIFFICULTY_ADJUST_INTERVAL: u64 = 69_120;
+pub const POW_TARGET_SPACING_SECS: u64 = 15;
+pub const POW_TARGET_TIMESPAN_SECS: u64 =
+    DIFFICULTY_ADJUST_INTERVAL * POW_TARGET_SPACING_SECS;
+pub const MINER_CONFIRMATION_WINDOW: u64 = 69_120;
 
 // ----------------------------------------------------------------------
 // Mainnet parameters
@@ -166,9 +183,11 @@ pub const NETWORK_MAGIC_MAIN: [u8; 4] = [0x58, 0x45, 0x50, 0x43]; // "XEPC"
 pub const DEFAULT_PORT_MAIN: u16 = 7555;
 pub const DEFAULT_RPC_PORT_MAIN: u16 = 7554;
 pub const DATADIR_NAME_MAIN: &str = ".xepay";
-pub const GENESIS_TIMESTAMP_MAIN: u128 = 1794497705601;
+
+// HARD FORK: New genesis timestamp (2026-11-15 00:00:00 UTC).
+pub const GENESIS_TIMESTAMP_MAIN: u128 = 1794733780684;
 pub const GENESIS_NBITS_MAIN: u32 = 0x1e0ffff0;
-pub const EXPECTED_GENESIS_NONCE_MAIN: u64 = 0;
+pub const EXPECTED_GENESIS_NONCE_MAIN: u64 = 90491;
 
 // ----------------------------------------------------------------------
 // Testnet parameters
@@ -178,9 +197,9 @@ pub const NETWORK_MAGIC_TEST: [u8; 4] = [0x5a, 0x54, 0x45, 0x53]; // "ZTES"
 pub const DEFAULT_PORT_TEST: u16 = 12255;
 pub const DEFAULT_RPC_PORT_TEST: u16 = 12254;
 pub const DATADIR_NAME_TEST: &str = ".xepay-testnet";
-pub const GENESIS_TIMESTAMP_TEST: u128 = 1792303198446;
+pub const GENESIS_TIMESTAMP_TEST: u128 = 1794733932120;
 pub const GENESIS_NBITS_TEST: u32 = 0x1e0ffff0;
-pub const EXPECTED_GENESIS_NONCE_TEST: u64 = 0;
+pub const EXPECTED_GENESIS_NONCE_TEST: u64 = 840426;
 
 // ----------------------------------------------------------------------
 // Regtest parameters
@@ -190,7 +209,7 @@ pub const NETWORK_MAGIC_REGTEST: [u8; 4] = [0x5a, 0x52, 0x45, 0x47]; // "ZREG"
 pub const DEFAULT_PORT_REGTEST: u16 = 18444;
 pub const DEFAULT_RPC_PORT_REGTEST: u16 = 18443;
 pub const DATADIR_NAME_REGTEST: &str = ".xepay-regtest";
-pub const GENESIS_TIMESTAMP_REGTEST: u128 = 1792303198447;
+pub const GENESIS_TIMESTAMP_REGTEST: u128 = 1794734004433;
 pub const GENESIS_NBITS_REGTEST: u32 = 0x207fffff;
 pub const EXPECTED_GENESIS_NONCE_REGTEST: u64 = 0;
 
@@ -211,7 +230,9 @@ pub fn max_supply() -> u64 { MAX_SUPPLY }
 pub fn initial_reward_xepc() -> u64 { INITIAL_REWARD_XEPC }
 pub fn initial_reward() -> u64 { INITIAL_REWARD }
 pub fn subsidy_halving_interval() -> u64 { SUBSIDY_HALVING_INTERVAL }
-pub fn max_halvings() -> u32 { MAX_HALVINGS }
+pub fn reward_reduction_numerator() -> u64 { REWARD_REDUCTION_NUMERATOR }
+pub fn reward_reduction_denominator() -> u64 { REWARD_REDUCTION_DENOMINATOR }
+pub fn max_eras() -> u32 { MAX_ERAS }
 pub fn pow_target_spacing_secs() -> u64 { POW_TARGET_SPACING_SECS }
 pub fn pow_target_timespan_secs() -> u64 { POW_TARGET_TIMESPAN_SECS }
 pub fn miner_confirmation_window() -> u64 { MINER_CONFIRMATION_WINDOW }

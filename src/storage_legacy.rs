@@ -54,7 +54,7 @@ pub fn save_chain(chain: &mut Blockchain) -> std::io::Result<()> {
 pub fn load_chain() -> std::io::Result<Blockchain> {
     let db_path = datadir::state_db_path();
 
-    let blocks = load_blocks()?;
+    let mut blocks = load_blocks()?;
     if blocks.is_empty() {
         return Ok(Blockchain::new());
     }
@@ -68,6 +68,18 @@ pub fn load_chain() -> std::io::Result<Blockchain> {
         return Err(Error::other(
             "consensus failure: the genesis block previous_hash is not zero.",
         ));
+    }
+
+    // FIX: Force the genesis block's state_root to be empty and recompute
+    // its hash. The genesis block was originally mined with an empty
+    // state_root, and its hash must match EXPECTED_GENESIS_HASH. An older
+    // version of the code accidentally filled in the genesis state_root
+    // after initialization, which made the on-disk hash inconsistent
+    // with the recomputed hash. This fix restores consistency without
+    // requiring a reindex.
+    if let Some(genesis) = blocks.first_mut() {
+        genesis.state_root = String::new();
+        genesis.hash = genesis.calculate_hash();
     }
 
     // ------------------------------------------------------------------

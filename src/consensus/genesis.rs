@@ -17,7 +17,7 @@ use crate::consensus::spec::{self, Network}; // Network selector and parameters.
 // The message embedded in the genesis coinbase transaction.
 pub const GENESIS_MESSAGE: &str = "XEPAY Genesis - 2026";
 // The secret embedded in the genesis secret transaction.
-pub const GENESIS_SECRET: &str = "ID Today 12/Nov/2026 Aldianokto, Chaos in the Treasury, Order in the Code";
+pub const GENESIS_SECRET: &str = "ID Today 15/Nov/2026 Aldianokto, Chaos in the Treasury, Order in the Code";
 
 // ----------------------------------------------------------------------
 // Genesis output script (P2PK, same format as the reference implementation)
@@ -27,14 +27,18 @@ pub const GENESIS_SECRET: &str = "ID Today 12/Nov/2026 Aldianokto, Chaos in the 
 // public key. With ML-DSA-65, the public key is 1952 bytes. Because the
 // genesis output is never spent, the script is a placeholder that
 // documents the intent without committing to a verifiable ML-DSA key.
-pub const GENESIS_OUTPUT_SCRIPT: &str = "ML-DSA-65 OP_CHECKSIG";
+//
+// The 64-character hex string is SHA3-256(public_key), included for
+// documentation only. It is not used for consensus verification.
+pub const GENESIS_OUTPUT_SCRIPT: &str =
+    "ML-DSA-65 OP_CHECKSIG 5f8df2f30478b134cda29c84357bd085a5de0016316ddbd66cf4df9e56662243";
 
 // ----------------------------------------------------------------------
 // Mainnet genesis
 // ----------------------------------------------------------------------
 
 // The mainnet genesis timestamp (in milliseconds).
-pub const GENESIS_TIMESTAMP: u128 = 1794497705601;
+pub const GENESIS_TIMESTAMP: u128 = 1794733780684;
 
 // The expected mainnet genesis hash.
 //
@@ -42,56 +46,56 @@ pub const GENESIS_TIMESTAMP: u128 = 1794497705601;
 // GENESIS_OUTPUT_SCRIPT or the signature algorithm. Run `xepay-genesis`
 // and paste the output here.
 pub const EXPECTED_GENESIS_HASH: &str =
-    "00000ea8a2c578692cd5a06e9231f438b703ddbb351487361e5b8579c6d27602";
+    "00000fe6609fb67947daa18ae0347f775c4b0ca61e571027588806e648c2d587";
 
 // The expected mainnet genesis merkle root.
 pub const EXPECTED_GENESIS_MERKLE_ROOT: &str =
-    "5b5f87574865b0d5978f82cc026ffe79f3712b7ff0fa9a8810a38f1ed508fe56";
+    "6f011db91548cd152d9c0165bbb9abfb464e5e5ef805806b38d9eb2dad43c2cb";
 
 // The expected mainnet genesis timestamp.
-pub const EXPECTED_GENESIS_TIMESTAMP: u128 = 1794497705601;
+pub const EXPECTED_GENESIS_TIMESTAMP: u128 = 1794733780684;
 
 // The expected mainnet genesis nonce.
-pub const EXPECTED_GENESIS_NONCE: u64 = 227407;
+pub const EXPECTED_GENESIS_NONCE: u64 = 90491;
 
 // ----------------------------------------------------------------------
 // Testnet genesis
 // ----------------------------------------------------------------------
 
 // The testnet genesis timestamp (in milliseconds).
-pub const TESTNET_GENESIS_TIMESTAMP: u128 = 1792303198446;
+pub const TESTNET_GENESIS_TIMESTAMP: u128 = 1794733932120;
 
 // The expected testnet genesis hash.
 pub const TESTNET_EXPECTED_GENESIS_HASH: &str =
-    "PLACEHOLDER_RUN_XEPAY_GENESIS_TESTNET";
+    "00000635732b58e6b1dcd5415812c8d2eb2d4d75bddad90383439fb84f153598";
 
 // The expected testnet genesis merkle root.
 pub const TESTNET_EXPECTED_GENESIS_MERKLE_ROOT: &str =
-    "PLACEHOLDER_RUN_XEPAY_GENESIS_TESTNET";
+    "6f011db91548cd152d9c0165bbb9abfb464e5e5ef805806b38d9eb2dad43c2cb";
 
 // The expected testnet genesis timestamp.
-pub const TESTNET_EXPECTED_GENESIS_TIMESTAMP: u128 = 1792303198446;
+pub const TESTNET_EXPECTED_GENESIS_TIMESTAMP: u128 = 1794733932120;
 
 // The expected testnet genesis nonce.
-pub const TESTNET_EXPECTED_GENESIS_NONCE: u64 = 0;
+pub const TESTNET_EXPECTED_GENESIS_NONCE: u64 = 840426;
 
 // ----------------------------------------------------------------------
 // Regtest genesis
 // ----------------------------------------------------------------------
 
 // The regtest genesis timestamp (in milliseconds).
-pub const REGTEST_GENESIS_TIMESTAMP: u128 = 1792303198447;
+pub const REGTEST_GENESIS_TIMESTAMP: u128 = 1794734004433;
 
 // The expected regtest genesis hash.
 pub const REGTEST_EXPECTED_GENESIS_HASH: &str =
-    "PLACEHOLDER_RUN_XEPAY_GENESIS_REGTEST";
+    "5559761049b93e0b118f02a829b9cdc0a7769addf55d7c0c5c145ec40d4f6f80";
 
 // The expected regtest genesis merkle root.
 pub const REGTEST_EXPECTED_GENESIS_MERKLE_ROOT: &str =
-    "PLACEHOLDER_RUN_XEPAY_GENESIS_REGTEST";
+    "6f011db91548cd152d9c0165bbb9abfb464e5e5ef805806b38d9eb2dad43c2cb";
 
 // The expected regtest genesis timestamp.
-pub const REGTEST_EXPECTED_GENESIS_TIMESTAMP: u128 = 1792303198447;
+pub const REGTEST_EXPECTED_GENESIS_TIMESTAMP: u128 = 1794734004433;
 
 // The expected regtest genesis nonce.
 pub const REGTEST_EXPECTED_GENESIS_NONCE: u64 = 0;

@@ -168,7 +168,7 @@ impl StateDB {
             }
 
             let is_message = tx.is_message_tx();
-            
+
             if tx.from == tx.to {
                 if !is_message || tx.amount != rules::MIN_MESSAGE_AMOUNT {
                     return Err(format!(
@@ -268,6 +268,11 @@ impl StateDB {
         Ok(arr)
     }
 
+    /// Return the total balance of an address.
+    ///
+    /// Total balance = `acc.balance` (mature) + sum of all
+    /// `immature_rewards` (whether mature or not). This is the amount
+    /// that would be available if all immature rewards were mature.
     pub fn balance_of(&self, address: &str) -> u64 {
         match self.get_account(address) {
             Ok(Some(acc)) => {
@@ -282,6 +287,19 @@ impl StateDB {
         }
     }
 
+    /// Return the mature balance of an address at the given height.
+    ///
+    /// Mature balance = `acc.balance` + sum of `immature_rewards` whose
+    /// maturity height has been reached. Rewards that are still immature
+    /// are NOT included.
+    ///
+    /// NOTE: `acc.balance` only contains rewards that were explicitly
+    /// moved to the mature balance by `credit_reward`. In the current
+    /// implementation, `credit_reward` does NOT move rewards to
+    /// `acc.balance`; instead, it keeps them in `immature_rewards` and
+    /// lets `mature_balance_at` decide which are mature. Therefore,
+    /// `acc.balance` is always 0 for mining rewards, and the mature
+    /// balance is computed entirely from `immature_rewards`.
     pub fn mature_balance_at(&self, address: &str, current_height: u64) -> u64 {
         match self.get_account(address) {
             Ok(Some(acc)) => {
@@ -298,16 +316,25 @@ impl StateDB {
         }
     }
 
-    pub fn mature_balance_of(&self, address: &str) -> u64 {
-        match self.get_account(address) {
-            Ok(Some(acc)) => acc.balance,
-            _ => 0,
-        }
+    /// Return the mature balance of an address using the given height.
+    pub fn mature_balance_of(&self, address: &str, current_height: u64) -> u64 {
+        self.mature_balance_at(address, current_height)
     }
 
-    pub fn immature_balance_of(&self, address: &str) -> u64 {
+    /// Return the immature balance of an address at the given height.
+    ///
+    /// Immature balance = sum of `immature_rewards` whose maturity
+    /// height has NOT been reached yet.
+    pub fn immature_balance_of(&self, address: &str, current_height: u64) -> u64 {
         match self.get_account(address) {
-            Ok(Some(acc)) => acc.immature_rewards.iter().map(|(_, a)| a).sum(),
+            Ok(Some(acc)) => {
+                let maturity = crate::consensus::rules::COINBASE_MATURITY;
+                acc.immature_rewards
+                    .iter()
+                    .filter(|(height, _)| current_height < height.saturating_add(maturity))
+                    .map(|(_, amount)| *amount)
+                    .sum()
+            }
             _ => 0,
         }
     }
@@ -357,7 +384,6 @@ impl StateDB {
         fee: u64,
         nonce: u64,
     ) -> Result<(), String> {
-        // Allow self-send only for message transactions.
         if from == to {
             if amount != rules::MIN_MESSAGE_AMOUNT {
                 return Err("self-transfer is only allowed for message transactions".to_string());
@@ -387,11 +413,9 @@ impl StateDB {
             .checked_add(fee)
             .ok_or_else(|| "amount + fee overflows u64".to_string())?;
 
-        // FIX: Mature the rewards before checking the balance to ensure
-        // consensus consistency across nodes regardless of transaction order.
         let maturity = crate::consensus::rules::COINBASE_MATURITY;
         let current_height = crate::blockchain::Blockchain::height_from_state(self);
-        
+
         let mut still_immature = Vec::new();
         for (height, reward_amount) in from_acc.immature_rewards.drain(..) {
             if current_height >= height.saturating_add(maturity) {
@@ -434,7 +458,6 @@ impl StateDB {
                 .ok_or_else(|| "recipient balance overflow".to_string())?;
             self.update_account(to, &to_acc)?;
         } else {
-            // Self-send: refund the amount back to sender (fee is burned).
             from_acc.balance = from_acc
                 .balance
                 .checked_add(amount)
@@ -446,6 +469,19 @@ impl StateDB {
         Ok(())
     }
 
+    /// Credit a block reward to the miner account.
+    ///
+    /// The reward is added to `immature_rewards` and stays there until
+    /// it matures. Maturity is computed lazily by `mature_balance_at`,
+    /// which counts immature rewards whose maturity height has been
+    /// reached. This means `acc.balance` is NOT updated by this function;
+    /// it remains 0 for mining rewards.
+    ///
+    /// NOTE: This is a change from the previous implementation, which
+    /// moved matured rewards to `acc.balance`. That caused double-counting
+    /// because `mature_balance_at` also counted matured rewards. The new
+    /// approach keeps all rewards in `immature_rewards` and computes
+    /// maturity on demand.
     pub fn credit_reward(
         &mut self,
         miner: &str,
@@ -460,19 +496,9 @@ impl StateDB {
             storage: BTreeMap::new(),
         });
 
-        let maturity = crate::consensus::rules::COINBASE_MATURITY;
-
-        let mut still_immature = Vec::new();
-        for (height, amount) in acc.immature_rewards.drain(..) {
-            if block_height >= height.saturating_add(maturity) {
-                acc.balance = acc.balance.checked_add(amount).ok_or_else(|| {
-                    "balance overflow during maturity".to_string()
-                })?;
-            } else {
-                still_immature.push((height, amount));
-            }
-        }
-        acc.immature_rewards = still_immature;
+        // Just push the new reward to immature_rewards. Do NOT move
+        // matured rewards to acc.balance here. Maturity is computed
+        // lazily by mature_balance_at.
         acc.immature_rewards.push((block_height, reward));
 
         self.update_account(miner, &acc)?;
@@ -517,31 +543,22 @@ fn read_account_from_trie<D: DB>(
     }
 }
 
-/// Apply a block reward to the miner account in the given trie. This
-/// mirrors `StateDB::credit_reward` but operates on any trie, which
-/// allows the simulation to use an in-memory trie.
+/// Apply a block reward to the miner account in the given trie.
+///
+/// This mirrors `StateDB::credit_reward` but operates on any trie, which
+/// allows the simulation to use an in-memory trie. The reward is added
+/// to `immature_rewards` and is NOT moved to `acc.balance`. Maturity is
+/// computed lazily by `mature_balance_at`.
 fn credit_reward_on_trie<D: DB>(
     trie: &mut EthTrie<D>,
     miner: &str,
     reward: u64,
     block_height: u64,
-    maturity: u64,
+    _maturity: u64,
 ) -> Result<(), String> {
     let key = keccak(miner.as_bytes()).0;
     let mut acc = read_account_from_trie(trie, &key)?.unwrap_or_else(empty_account);
 
-    let mut still_immature = Vec::new();
-    for (height, amount) in acc.immature_rewards.drain(..) {
-        if block_height >= height.saturating_add(maturity) {
-            acc.balance = acc
-                .balance
-                .checked_add(amount)
-                .ok_or_else(|| "balance overflow during maturity".to_string())?;
-        } else {
-            still_immature.push((height, amount));
-        }
-    }
-    acc.immature_rewards = still_immature;
     acc.immature_rewards.push((block_height, reward));
 
     let value = rlp::encode(&acc).to_vec();

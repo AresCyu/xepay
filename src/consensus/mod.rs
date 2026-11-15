@@ -21,7 +21,7 @@ pub fn consensus_fingerprint_for(network: Network) -> String {
         .join(",");
 
     let payload = format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         network.name(),
         spec::HASH_ALGO,
         spec::SIGNATURE_ALGO,
@@ -32,7 +32,9 @@ pub fn consensus_fingerprint_for(network: Network) -> String {
         spec::INITIAL_REWARD_XEPC,
         spec::INITIAL_REWARD,
         spec::SUBSIDY_HALVING_INTERVAL,
-        spec::MAX_HALVINGS,
+        spec::REWARD_REDUCTION_NUMERATOR,
+        spec::REWARD_REDUCTION_DENOMINATOR,
+        spec::MAX_ERAS,
         spec::POW_TARGET_SPACING_SECS,
         spec::POW_TARGET_TIMESPAN_SECS,
         spec::MINER_CONFIRMATION_WINDOW,
@@ -59,48 +61,11 @@ pub fn consensus_fingerprint() -> String {
 }
 
 pub fn parameter_fingerprint_for(network: Network) -> String {
-    let softfork_fingerprint: String = blockchain::SOFT_FORK_DEPLOYMENTS
-        .iter()
-        .map(|(name, d)| format!("{}:{}:{}:{}:{}:{}:{}", name, d.bit, d.start_time, d.timeout, d.min_activation_height, d.period, d.threshold))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    let payload = format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        network.name(),
-        spec::HASH_ALGO,
-        spec::SIGNATURE_ALGO,
-        spec::DECIMALS,
-        spec::ALD_PER_XEPC,
-        spec::MAX_SUPPLY_XEPC,
-        spec::MAX_SUPPLY,
-        spec::INITIAL_REWARD_XEPC,
-        spec::INITIAL_REWARD,
-        spec::SUBSIDY_HALVING_INTERVAL,
-        spec::MAX_HALVINGS,
-        spec::POW_TARGET_SPACING_SECS,
-        spec::POW_TARGET_TIMESPAN_SECS,
-        spec::MINER_CONFIRMATION_WINDOW,
-        spec::DIFFICULTY_ADJUST_INTERVAL,
-        genesis::GENESIS_MESSAGE,
-        genesis::GENESIS_SECRET,
-        network.genesis_timestamp(),
-        genesis::GENESIS_OUTPUT_SCRIPT,
-        network.genesis_nbits(),
-        pow::pow_limit(),
-        rules::COINBASE_MATURITY,
-        blockchain::bech32_hrp_for(network),
-        rules::MAX_TX_PER_BLOCK,
-        rules::MAX_NOTE_LEN,
-        rules::BLOCK_VERSION,
-        rules::ZERO_HASH,
-        softfork_fingerprint,
-    );
-    sha3_256_hex(payload.as_bytes())
+    consensus_fingerprint_for(network)
 }
 
 pub fn parameter_fingerprint() -> String {
-    parameter_fingerprint_for(spec::current_network())
+    consensus_fingerprint_for(spec::current_network())
 }
 
 pub fn genesis_coinbase_txid_for(network: Network) -> String {
@@ -131,13 +96,15 @@ pub use spec::difficulty_adjust_interval;
 pub use spec::hash_algo;
 pub use spec::initial_reward;
 pub use spec::initial_reward_xepc;
-pub use spec::max_halvings;
+pub use spec::max_eras;
 pub use spec::max_supply;
 pub use spec::max_supply_xepc;
 pub use spec::miner_confirmation_window;
 pub use spec::pow_target_spacing_secs;
 pub use spec::pow_target_timespan_secs;
 pub use spec::protocol_version;
+pub use spec::reward_reduction_denominator;
+pub use spec::reward_reduction_numerator;
 pub use spec::signature_algo;
 pub use spec::subsidy_halving_interval;
 pub use spec::symbol;

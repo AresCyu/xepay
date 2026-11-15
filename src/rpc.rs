@@ -527,21 +527,23 @@ impl RpcHandler {
         };
 
         let current_height = c.height();
-        let halving_interval = consensus::subsidy_halving_interval();
-        let current_era = current_height / halving_interval;
-        let max_halvings = consensus::max_halvings() as u64;
+        let era_interval = consensus::subsidy_halving_interval();
+        let current_era = current_height / era_interval;
+        let max_eras = consensus::max_eras() as u64;
 
         let mut remaining_blocks: u64 = 0;
         let mut era_reward = consensus::initial_reward();
 
-        for era in current_era..max_halvings {
+        for era in current_era..max_eras {
             let blocks_in_era = if era == current_era {
-                halving_interval - (current_height % halving_interval)
+                era_interval - (current_height % era_interval)
             } else {
-                halving_interval
+                era_interval
             };
             remaining_blocks += blocks_in_era;
-            era_reward >>= 1;
+            era_reward = era_reward
+                .saturating_mul(consensus::reward_reduction_numerator())
+                / consensus::reward_reduction_denominator();
             if era_reward == 0 { break; }
         }
 
