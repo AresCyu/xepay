@@ -388,6 +388,8 @@ impl RpcHandler {
             "getaddtoaddress" => m_getaddtoaddress(req),
             "generatetoaddress" => self.m_generatetoaddress(req),
             "sendtoaddress" => self.m_sendtoaddress(req),
+            "sendmessage" => self.m_sendmessage(req),
+            "getmessages" => self.m_getmessages(req),
             "stop" => self.m_stop(),
             "getrawtransaction" => self.m_getrawtransaction(req),
             "decoderawtransaction" => self.m_decoderawtransaction(req),
@@ -626,6 +628,14 @@ impl RpcHandler {
         if !addresses.contains(&mining_address) {
             addresses.push(mining_address.clone());
         }
+        for tx in &mempool_snapshot {
+            if !addresses.contains(&tx.from) {
+                addresses.push(tx.from.clone());
+            }
+            if !addresses.contains(&tx.to) {
+                addresses.push(tx.to.clone());
+            }
+        }
 
         let state_root = match c.state.simulate_apply(
             &addresses,
@@ -699,6 +709,44 @@ impl RpcHandler {
 
         if let Err(e) = validation::validate_block(&mut chain, &prev, &block) {
             return RpcResponse::err(&format!("block rejected: {}", e));
+        }
+
+        // Pre-validation of state root simulation to prevent state corruption.
+        let mut addresses = chain.addresses.clone();
+        if !addresses.contains(&block.mined_for) {
+            addresses.push(block.mined_for.clone());
+        }
+        for tx in &block.transactions {
+            if !addresses.contains(&tx.from) {
+                addresses.push(tx.from.clone());
+            }
+            if !addresses.contains(&tx.to) {
+                addresses.push(tx.to.clone());
+            }
+        }
+
+        let simulated_root = match chain.state.simulate_apply(
+            &addresses,
+            &block.transactions,
+            &block.mined_for,
+            block.reward,
+            block.index,
+        ) {
+            Ok(root) => root,
+            Err(e) => {
+                return RpcResponse::err(&format!(
+                    "failed to simulate block for state root validation: {}",
+                    e
+                ))
+            }
+        };
+
+        let simulated_root_hex = hex::encode(simulated_root);
+        if simulated_root_hex != block.state_root {
+            return RpcResponse::err(&format!(
+                "block rejected: state root mismatch (declared {}, simulated {})",
+                block.state_root, simulated_root_hex
+            ));
         }
 
         for tx in &block.transactions {
@@ -1017,6 +1065,7 @@ impl RpcHandler {
                         "fee_rate": blockchain::Blockchain::fee_rate(tx),
                         "nonce": tx.nonce,
                         "note": tx.note,
+                        "is_message": tx.is_message_tx(),
                         "public_key": hex::encode(&tx.public_key),
                         "signature": hex::encode(&tx.signature),
                         "output_script": tx.output_script,
@@ -1061,6 +1110,7 @@ impl RpcHandler {
                     "fee_rate": blockchain::Blockchain::fee_rate(tx),
                     "nonce": tx.nonce,
                     "note": tx.note,
+                    "is_message": tx.is_message_tx(),
                     "public_key": hex::encode(&tx.public_key),
                     "signature": hex::encode(&tx.signature),
                     "output_script": tx.output_script,
@@ -1093,6 +1143,7 @@ impl RpcHandler {
                         "fee_rate": blockchain::Blockchain::fee_rate(tx),
                         "nonce": tx.nonce,
                         "note": tx.note,
+                        "is_message": tx.is_message_tx(),
                         "public_key": hex::encode(&tx.public_key),
                         "signature": hex::encode(&tx.signature),
                         "block_hash": block.hash,
@@ -1115,6 +1166,7 @@ impl RpcHandler {
                     "fee_rate": blockchain::Blockchain::fee_rate(tx),
                     "nonce": tx.nonce,
                     "note": tx.note,
+                    "is_message": tx.is_message_tx(),
                     "public_key": hex::encode(&tx.public_key),
                     "signature": hex::encode(&tx.signature),
                     "in_mempool": true,
@@ -1260,11 +1312,16 @@ impl RpcHandler {
                 let mut valid_txs = Vec::new();
 
                 for tx in all_txs {
-                    match chain.apply_and_execute_transaction(&tx) {
-                        Ok(_) => valid_txs.push(tx),
-                        Err(e) => {
-                            println!("[mempool] Dropped invalid tx {} during mining: {}", tx.txid, e);
-                        }
+                    if let Err(e) = validation::validate_transaction(&chain, &tx) {
+                        println!("[mempool] Rejected invalid tx {} during mining: {}", tx.txid, e);
+                        return RpcResponse::err(&format!("transaction validation failed: {}", e));
+                    }
+                    valid_txs.push(tx);
+                }
+
+                for tx in &valid_txs {
+                    if let Err(e) = chain.apply_and_execute_transaction(tx) {
+                        return RpcResponse::err(&format!("failed to apply tx: {}", e));
                     }
                 }
 
@@ -1387,7 +1444,7 @@ impl RpcHandler {
             custom
         } else {
             // Ask the chain for the current dynamic minimum fee
-            let chain = self.state.chain.blocking_read();
+            let mut chain = self.state.chain.blocking_write();
             let dynamic_min_fee_rate = chain.current_min_fee_per_byte();
             drop(chain);
             
@@ -1553,6 +1610,191 @@ impl RpcHandler {
         }))
     }
 
+    fn m_sendmessage(&mut self, req: &RpcRequest) -> RpcResponse {
+        if req.params.is_empty() {
+            return RpcResponse::err("sendmessage requires <message> [from_address] [fee_ald]");
+        }
+
+        let message = match req.params[0].as_str() {
+            Some(m) => m.to_string(),
+            None => return RpcResponse::err("invalid message"),
+        };
+
+        if message.is_empty() {
+            return RpcResponse::err("message must not be empty");
+        }
+        if message.len() > crate::consensus::rules::MAX_MESSAGE_LEN {
+            return RpcResponse::err(&format!(
+                "message exceeds {} bytes",
+                crate::consensus::rules::MAX_MESSAGE_LEN
+            ));
+        }
+
+        let mut wallet = match Wallet::load_default() {
+            Ok(w) => w,
+            Err(_) => return RpcResponse::err("wallet not found"),
+        };
+
+        if wallet.encrypted {
+            let pass_opt = self.state.wallet_password.blocking_read().clone();
+            match pass_opt {
+                Some(pass) => match wallet.decrypt(&pass) {
+                    Ok(decrypted) => wallet = decrypted,
+                    Err(_) => {
+                        return RpcResponse::err("wallet is locked. Run walletpassphrase first.")
+                    }
+                },
+                None => return RpcResponse::err("wallet is locked. Run walletpassphrase first."),
+            }
+        }
+
+        let from_address: String = if req.params.len() >= 2 {
+            match req.params[1].as_str() {
+                Some(a) => a.to_string(),
+                None => return RpcResponse::err("invalid from address"),
+            }
+        } else {
+            match wallet.default_address() {
+                Some(e) => e.address.clone(),
+                None => return RpcResponse::err("wallet has no addresses"),
+            }
+        };
+
+        let fee: u64 = if let Some(custom) = req.params.get(2).and_then(|v| v.as_u64()) {
+            if custom == 0 {
+                return RpcResponse::err("fee must be greater than zero");
+            }
+            custom
+        } else {
+            let mut chain = self.state.chain.blocking_write();
+            let rate = chain.current_min_fee_per_byte();
+            drop(chain);
+            let estimated_size = 5_400 + message.len() as u64;
+            (rate * estimated_size).max(DEFAULT_FEE_XEPC)
+        };
+
+        let entry = match wallet.get_entry(&from_address) {
+            Some(e) => e.clone(),
+            None => return RpcResponse::err(&format!("source address {} not found in wallet", from_address)),
+        };
+
+        let nonce = {
+            let chain = self.state.chain.blocking_read();
+            chain.next_nonce_for(&entry.address)
+        };
+
+        let mut tx = match Transaction::new_message(&entry.address, fee, nonce, &message) {
+            Ok(tx) => tx,
+            Err(e) => return RpcResponse::err(&format!("failed to build message tx: {}", e)),
+        };
+
+        if let Err(e) = tx.sign(&entry.secret) {
+            return RpcResponse::err(&format!("failed to sign: {}", e));
+        }
+        let txid = tx.txid.clone();
+
+        let mut chain = self.state.chain.blocking_write();
+        if !chain.add_transaction(tx.clone()) {
+            return RpcResponse::err("transaction rejected by mempool (RBF, eviction, or dynamic min relay fee)");
+        }
+
+        let now = now_millis();
+        println!(
+            "[mempool] {} Accepted message tx {} from {} fee={} xepc len={} bytes",
+            format_datetime(now),
+            txid,
+            entry.address,
+            to_coin(fee),
+            message.len()
+        );
+
+        let mempool_len = chain.mempool.len();
+        drop(chain);
+
+        let cmd_tx = self.state.network_cmd_tx.clone();
+        let _ = cmd_tx.blocking_send(NetworkCommand::BroadcastTransaction(txid.clone()));
+
+        RpcResponse::ok(json!({
+            "txid": txid,
+            "from": entry.address,
+            "to": entry.address,
+            "amount_ald": crate::consensus::rules::MIN_MESSAGE_AMOUNT,
+            "fee_xepc": to_coin(fee),
+            "fee_ald": to_aldian(fee),
+            "nonce": nonce,
+            "message_hex": hex::encode(message.as_bytes()),
+            "message_len": message.len(),
+            "mempool_len": mempool_len,
+        }))
+    }
+
+    fn m_getmessages(&self, req: &RpcRequest) -> RpcResponse {
+        let filter_addr = req.params.first().and_then(|v| v.as_str()).map(|s| s.to_string());
+        let start_height = req.params.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+        let end_height = req.params.get(2).and_then(|v| v.as_u64());
+
+        let chain = self.state.chain.blocking_read();
+        let mut messages: Vec<Value> = Vec::new();
+
+        for block in &chain.chain {
+            if block.index < start_height { continue; }
+            if let Some(end) = end_height {
+                if block.index > end { continue; }
+            }
+            for tx in &block.transactions {
+                if !tx.is_message_tx() { continue; }
+                if let Some(addr) = &filter_addr {
+                    if &tx.from != addr { continue; }
+                }
+                let msg = match tx.extract_message() {
+                    Some(m) => m,
+                    None => continue,
+                };
+                messages.push(json!({
+                    "txid": tx.txid,
+                    "from": tx.from,
+                    "to": tx.to,
+                    "message": msg,
+                    "message_hex": hex::encode(msg.as_bytes()),
+                    "amount_ald": to_aldian(tx.amount),
+                    "fee_ald": to_aldian(tx.fee),
+                    "nonce": tx.nonce,
+                    "block_height": block.index,
+                    "block_hash": block.hash,
+                    "block_timestamp": block.timestamp,
+                    "block_mined_at": block.mined_at,
+                }));
+            }
+        }
+
+        for tx in &chain.mempool {
+            if !tx.is_message_tx() { continue; }
+            if let Some(addr) = &filter_addr {
+                if &tx.from != addr { continue; }
+            }
+            let msg = match tx.extract_message() {
+                Some(m) => m,
+                None => continue,
+            };
+            messages.push(json!({
+                "txid": tx.txid,
+                "from": tx.from,
+                "to": tx.to,
+                "message": msg,
+                "message_hex": hex::encode(msg.as_bytes()),
+                "amount_ald": to_aldian(tx.amount),
+                "fee_ald": to_aldian(tx.fee),
+                "nonce": tx.nonce,
+                "in_mempool": true,
+            }));
+        }
+
+        RpcResponse::ok(json!({
+            "count": messages.len(),
+            "messages": messages,
+        }))
+    }
+
     fn m_getcreatewallet(&mut self) -> RpcResponse {
         if let Err(e) = datadir::ensure_dirs() {
             return RpcResponse::err(&format!("failed to prepare datadir: {}", e));
@@ -1564,6 +1806,7 @@ impl RpcHandler {
             encrypted: false,
             salt: String::new(),
             nonce: String::new(),
+            cached_password: None,
         });
 
         if w.encrypted {
@@ -1605,6 +1848,7 @@ impl RpcHandler {
             encrypted: false,
             salt: String::new(),
             nonce: String::new(),
+            cached_password: None,
         });
 
         if w.encrypted {
@@ -1731,6 +1975,11 @@ fn m_dumpprivkey(req: &RpcRequest) -> RpcResponse {
         Err(_) => return RpcResponse::err("wallet not found"),
     };
 
+    // FIX BUG M: Prevent dumping ciphertext by enforcing decryption first.
+    if w.encrypted {
+        return RpcResponse::err("wallet is encrypted. Use walletpassphrase to unlock it first.");
+    }
+
     let entry = match w.get_entry(&target) {
         Some(e) => e,
         None => return RpcResponse::err("address not found in wallet"),
@@ -1785,8 +2034,10 @@ fn m_importprivkey(req: &RpcRequest) -> RpcResponse {
         encrypted: false,
         salt: String::new(),
         nonce: String::new(),
+        cached_password: None,
     });
 
+    // FIX BUG M: Prevent importing into an encrypted wallet without unlocking.
     if w.encrypted {
         return RpcResponse::err("wallet is encrypted. Use walletpassphrase to unlock it first.");
     }
@@ -1860,6 +2111,7 @@ fn m_encryptwallet(req: &RpcRequest) -> RpcResponse {
         Err(_) => return RpcResponse::err("wallet not found"),
     };
 
+    // BUG U fix: enforce non-empty password in the wallet layer.
     if let Err(e) = w.encrypt(&pass) {
         return RpcResponse::err(&format!("failed to encrypt wallet: {}", e));
     }

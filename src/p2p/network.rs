@@ -32,11 +32,14 @@ use crate::utils::{format_datetime, now_millis};
 use crate::validation;
 
 const ASMAP_JSON: &str = include_str!("asmap.json");
-const MAX_WRITE_BUFFER: usize = 10 * 1024 * 1024;
+
+// FIX BUG BA: Reduce the write buffer limit to prevent OOM with many inbound peers.
+const MAX_WRITE_BUFFER: usize = 2 * 1024 * 1024;
 
 // Rate limiting constants for incoming P2P messages.
 const MAX_TX_PER_SECOND: u32 = 50;
 const MAX_INV_PER_SECOND: u32 = 100;
+const MAX_HEADERS_PER_SECOND: u32 = 20; // FIX BUG AL: Rate limit for headers
 const RATE_LIMIT_WINDOW_SECS: u64 = 1;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -99,6 +102,7 @@ struct Connection {
     // Rate limiting state per connection.
     tx_count: u32,
     inv_count: u32,
+    headers_count: u32, // FIX BUG AL
     last_reset: Instant,
 }
 
@@ -467,6 +471,7 @@ impl Network {
                         write_buf: Vec::new(),
                         tx_count: 0,
                         inv_count: 0,
+                        headers_count: 0,
                         last_reset: Instant::now(),
                     },
                 );
@@ -521,6 +526,7 @@ impl Network {
                 write_buf: Vec::new(),
                 tx_count: 0,
                 inv_count: 0,
+                headers_count: 0,
                 last_reset: Instant::now(),
             },
         );
@@ -591,7 +597,9 @@ impl Network {
 
             let mut buf = [0u8; 4096];
             let read_fut = conn.stream.read(&mut buf);
-            let read_result = tokio::time::timeout(Duration::from_millis(10), read_fut).await;
+            // FIX BUG AN: Increase timeout to 100ms to prevent false disconnect
+            // due to high load or network latency.
+            let read_result = tokio::time::timeout(Duration::from_millis(100), read_fut).await;
 
             match read_result {
                 Ok(Ok(0)) => (Err("peer closed the connection".to_string()), false),
@@ -645,7 +653,9 @@ impl Network {
                 if conn.read_buf.is_empty() {
                     return;
                 }
-                let mut cursor = std::io::Cursor::new(conn.read_buf.clone());
+                // FIX BUG AM: Avoid cloning the entire buffer on each iteration.
+                // We read from the buffer slice directly and drain only the consumed bytes.
+                let mut cursor = std::io::Cursor::new(&conn.read_buf);
                 match read_message(&mut cursor) {
                     Ok((cmd, payload)) => {
                         let consumed = cursor.position() as usize;
@@ -781,6 +791,7 @@ impl Network {
                     if conn.last_reset.elapsed().as_secs() >= RATE_LIMIT_WINDOW_SECS {
                         conn.inv_count = 0;
                         conn.tx_count = 0;
+                        conn.headers_count = 0;
                         conn.last_reset = Instant::now();
                     }
                     conn.inv_count += 1;
@@ -855,6 +866,25 @@ impl Network {
                 }
             }
             Message::GetHeaders(loc) => {
+                // FIX BUG AL: Rate limit getheaders messages per connection.
+                {
+                    let conn = match self.connections.get_mut(&id) {
+                        Some(c) => c,
+                        None => return,
+                    };
+                    if conn.last_reset.elapsed().as_secs() >= RATE_LIMIT_WINDOW_SECS {
+                        conn.headers_count = 0;
+                        conn.inv_count = 0;
+                        conn.tx_count = 0;
+                        conn.last_reset = Instant::now();
+                    }
+                    conn.headers_count += 1;
+                    if conn.headers_count > MAX_HEADERS_PER_SECOND {
+                        self.punish(id, 20, "getheaders rate limit exceeded").await;
+                        return;
+                    }
+                }
+
                 let chain = self.chain.read().await;
                 let headers = build_headers_response(&chain, &loc);
                 drop(chain);
@@ -876,6 +906,7 @@ impl Network {
                     if conn.last_reset.elapsed().as_secs() >= RATE_LIMIT_WINDOW_SECS {
                         conn.tx_count = 0;
                         conn.inv_count = 0;
+                        conn.headers_count = 0;
                         conn.last_reset = Instant::now();
                     }
                     conn.tx_count += 1;
@@ -969,11 +1000,29 @@ impl Network {
         let tip_index = chain.chain.last().map(|b| b.index).unwrap_or(0);
         let mut to_request = Vec::new();
         for h in &headers {
-            if validation::rule_block_pow(h).is_err() {
+            // FIX BUG AY: Validate all header fields, not just PoW.
+            if let Err(e) = validation::rule_block_pow(h) {
                 drop(chain);
-                self.punish(id, 50, "invalid header proof of work").await;
+                self.punish(id, 50, &format!("invalid header PoW: {}", e)).await;
                 return;
             }
+            if let Err(e) = validation::rule_block_hash_consistent(h) {
+                drop(chain);
+                self.punish(id, 50, &format!("invalid header hash: {}", e)).await;
+                return;
+            }
+            if let Err(e) = validation::rule_block_nbits(&chain, h) {
+                drop(chain);
+                self.punish(id, 50, &format!("invalid header nbits: {}", e)).await;
+                return;
+            }
+            // Timestamp validation for headers to prevent sync stall.
+            if h.timestamp > crate::utils::now_millis().saturating_add(2 * 60 * 60 * 1000) {
+                drop(chain);
+                self.punish(id, 50, "header timestamp too far in the future").await;
+                return;
+            }
+
             if h.index > tip_index && !self.inv.has_block(&h.hash) {
                 // Respect the moving download window.
                 if self.sync_state.request_block(&h.hash) {
@@ -1065,6 +1114,11 @@ impl Network {
     async fn disconnect(&mut self, id: u64, reason: &str) {
         if let Some(mut conn) = self.connections.remove(&id) {
             let _ = conn.stream.shutdown().await;
+            // FIX BUG AO: Remove the peer from the block relay anchor list
+            // to prevent reconnecting to a dead anchor on restart.
+            if let Some(idx) = self.block_relay_peers.iter().position(|a| *a == conn.addr) {
+                self.block_relay_peers.remove(idx);
+            }
         }
         self.peer_manager.remove(id, reason);
         println!("[p2p] disconnect {}: {}", id, reason);

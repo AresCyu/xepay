@@ -126,10 +126,53 @@ impl SyncState {
             return Err(format!("state rollback failed: {}", e));
         }
 
+        // FIX BUG AW: Rebuild the mempool and addresses from the remaining chain
+        // to prevent stale transactions from causing double spends.
+        let mut addresses = vec!["GENESIS".to_string()];
+        let mut new_mempool = Vec::new();
+        let mut mempool_timestamps = std::collections::HashMap::new();
+        
+        for block in &chain.chain {
+            if !block.mined_for.is_empty() && !addresses.contains(&block.mined_for) {
+                addresses.push(block.mined_for.clone());
+            }
+            for tx in &block.transactions {
+                if !validation::is_special_tx(tx) {
+                    if !addresses.contains(&tx.from) {
+                        addresses.push(tx.from.clone());
+                    }
+                    if !addresses.contains(&tx.to) {
+                        addresses.push(tx.to.clone());
+                    }
+                }
+            }
+        }
+
+        // Re-add transactions from rolled-back blocks back to mempool
+        // if they are still valid against the new chain state.
+        for block in &rollback_blocks {
+            for tx in &block.transactions {
+                if validation::is_special_tx(tx) {
+                    continue;
+                }
+                // Re-validate against the current (rolled back) chain.
+                if validation::validate_transaction(chain, tx).is_ok() {
+                    new_mempool.push(tx.clone());
+                    let now = (crate::utils::now_millis() / 1000) as u64;
+                    mempool_timestamps.insert(tx.txid.clone(), now);
+                }
+            }
+        }
+
+        chain.addresses = addresses;
+        chain.mempool = new_mempool;
+        chain.mempool_timestamps = mempool_timestamps;
+
         println!(
-            "[reorg] rolled back {} blocks to height {}",
+            "[reorg] rolled back {} blocks to height {}, rebuilt mempool with {} transactions",
             rollback_blocks.len(),
-            ancestor_index
+            ancestor_index,
+            chain.mempool.len()
         );
 
         if let Err(e) = Self::accept_block(chain, new_block) {
@@ -162,6 +205,44 @@ impl SyncState {
 
         if let Err(e) = validation::validate_block(chain, &prev, &block) {
             return Err(format!("block {} rejected: {}", block.index, e));
+        }
+
+        // Pre-validation of state root simulation to prevent state corruption.
+        let mut addresses = chain.addresses.clone();
+        if !addresses.contains(&block.mined_for) {
+            addresses.push(block.mined_for.clone());
+        }
+        for tx in &block.transactions {
+            if !addresses.contains(&tx.from) {
+                addresses.push(tx.from.clone());
+            }
+            if !addresses.contains(&tx.to) {
+                addresses.push(tx.to.clone());
+            }
+        }
+
+        let simulated_root = match chain.state.simulate_apply(
+            &addresses,
+            &block.transactions,
+            &block.mined_for,
+            block.reward,
+            block.index,
+        ) {
+            Ok(root) => root,
+            Err(e) => {
+                return Err(format!(
+                    "failed to simulate block for state root validation: {}",
+                    e
+                ));
+            }
+        };
+
+        let simulated_root_hex = hex::encode(simulated_root);
+        if simulated_root_hex != block.state_root {
+            return Err(format!(
+                "block rejected: state root mismatch (declared {}, simulated {})",
+                block.state_root, simulated_root_hex
+            ));
         }
 
         for tx in &block.transactions {
