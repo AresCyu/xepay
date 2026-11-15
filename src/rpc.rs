@@ -374,8 +374,8 @@ impl RpcHandler {
             "getgenesishash" => self.m_getgenesishash(),
             "getgenesis" => self.m_getgenesis(),
             "getlistwallet" => m_getlistwallet(self.state.chain.clone()),
-            "dumpprivkey" => m_dumpprivkey(req),
-            "dumpwallet" => m_dumpwallet(),
+            "dumpprivkey" => self.m_dumpprivkey(req),
+            "dumpwallet" => self.m_dumpwallet(),
             "importprivkey" => m_importprivkey(req),
             "getcreatewallet" => self.m_getcreatewallet(),
             "getcreatewalletbech32" => self.m_getcreatewalletbech32(),
@@ -1912,6 +1912,77 @@ impl RpcHandler {
             Err(e) => RpcResponse::err(&format!("failed to decrypt wallet: {}", e)),
         }
     }
+
+    fn m_dumpprivkey(&self, req: &RpcRequest) -> RpcResponse {
+        let target = match req.params.first().and_then(|v| v.as_str()) {
+            Some(a) => a.to_string(),
+            None => return RpcResponse::err("dumpprivkey requires an address"),
+        };
+
+        let mut w = match Wallet::load_default() {
+            Ok(w) => w,
+            Err(_) => return RpcResponse::err("wallet not found"),
+        };
+
+        if w.encrypted {
+            let pass_opt = self.state.wallet_password.blocking_read().clone();
+            match pass_opt {
+                Some(pass) => match w.decrypt(&pass) {
+                    Ok(decrypted) => w = decrypted,
+                    Err(_) => {
+                        return RpcResponse::err("wallet is locked. Run walletpassphrase first.")
+                    }
+                },
+                None => return RpcResponse::err("wallet is locked. Run walletpassphrase first."),
+            }
+        }
+
+        let entry = match w.get_entry(&target) {
+            Some(e) => e,
+            None => return RpcResponse::err("address not found in wallet"),
+        };
+
+        RpcResponse::ok(json!({
+            "address": entry.address,
+            "privkey": entry.secret,
+        }))
+    }
+
+    fn m_dumpwallet(&self) -> RpcResponse {
+        let mut w = match Wallet::load_default() {
+            Ok(w) => w,
+            Err(_) => return RpcResponse::err("wallet not found"),
+        };
+
+        if w.encrypted {
+            let pass_opt = self.state.wallet_password.blocking_read().clone();
+            match pass_opt {
+                Some(pass) => match w.decrypt(&pass) {
+                    Ok(decrypted) => w = decrypted,
+                    Err(_) => {
+                        return RpcResponse::err("wallet is locked. Run walletpassphrase first.")
+                    }
+                },
+                None => return RpcResponse::err("wallet is locked. Run walletpassphrase first."),
+            }
+        }
+
+        let mut addresses = Vec::new();
+        for entry in &w.entries {
+            addresses.push(json!({
+                "address": entry.address,
+                "public_key": entry.public_key,
+                "secret": entry.secret,
+                "label": entry.label,
+            }));
+        }
+
+        RpcResponse::ok(json!({
+            "count": addresses.len(),
+            "addresses": addresses,
+            "message": "wallet dumped successfully. Keep this data secure.",
+        }))
+    }
 }
 
 fn m_getcheckpoints() -> RpcResponse {
@@ -1964,60 +2035,6 @@ fn m_getlistwallet(chain_arc: Arc<RwLock<Blockchain>>) -> RpcResponse {
     }))
 }
 
-fn m_dumpprivkey(req: &RpcRequest) -> RpcResponse {
-    let target = match req.params.first().and_then(|v| v.as_str()) {
-        Some(a) => a.to_string(),
-        None => return RpcResponse::err("dumpprivkey requires an address"),
-    };
-
-    let w = match Wallet::load_default() {
-        Ok(w) => w,
-        Err(_) => return RpcResponse::err("wallet not found"),
-    };
-
-    // FIX BUG M: Prevent dumping ciphertext by enforcing decryption first.
-    if w.encrypted {
-        return RpcResponse::err("wallet is encrypted. Use walletpassphrase to unlock it first.");
-    }
-
-    let entry = match w.get_entry(&target) {
-        Some(e) => e,
-        None => return RpcResponse::err("address not found in wallet"),
-    };
-
-    RpcResponse::ok(json!({
-        "address": entry.address,
-        "privkey": entry.secret,
-    }))
-}
-
-fn m_dumpwallet() -> RpcResponse {
-    let w = match Wallet::load_default() {
-        Ok(w) => w,
-        Err(_) => return RpcResponse::err("wallet not found"),
-    };
-
-    if w.encrypted {
-        return RpcResponse::err("wallet is encrypted. Use walletpassphrase to unlock it first.");
-    }
-
-    let mut addresses = Vec::new();
-    for entry in &w.entries {
-        addresses.push(json!({
-            "address": entry.address,
-            "public_key": entry.public_key,
-            "secret": entry.secret,
-            "label": entry.label,
-        }));
-    }
-
-    RpcResponse::ok(json!({
-        "count": addresses.len(),
-        "addresses": addresses,
-        "message": "wallet dumped successfully. Keep this data secure.",
-    }))
-}
-
 fn m_importprivkey(req: &RpcRequest) -> RpcResponse {
     let secret = match req.params.first().and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
@@ -2037,7 +2054,6 @@ fn m_importprivkey(req: &RpcRequest) -> RpcResponse {
         cached_password: None,
     });
 
-    // FIX BUG M: Prevent importing into an encrypted wallet without unlocking.
     if w.encrypted {
         return RpcResponse::err("wallet is encrypted. Use walletpassphrase to unlock it first.");
     }
@@ -2111,7 +2127,6 @@ fn m_encryptwallet(req: &RpcRequest) -> RpcResponse {
         Err(_) => return RpcResponse::err("wallet not found"),
     };
 
-    // BUG U fix: enforce non-empty password in the wallet layer.
     if let Err(e) = w.encrypt(&pass) {
         return RpcResponse::err(&format!("failed to encrypt wallet: {}", e));
     }
